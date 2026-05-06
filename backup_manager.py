@@ -228,8 +228,8 @@ Examples:
     )
     parser.add_argument(
         '--target-port',
-        type=str,
-        default='1433',
+        type=int,
+        default=1433,
         help='Target SQL Server port (default: 1433)'
     )
     parser.add_argument(
@@ -299,10 +299,16 @@ Examples:
     # Backup database(s)
     if args.backup:
         if len(args.backup) == 1:
-            success = DatabaseService.backup_database(args.backup[0])
+            success = DatabaseService.backup_database(
+                args.backup[0],
+                backup_path=args.output
+            )
             return 0 if success else 1
         else:
-            results = DatabaseService.backup_all_databases(args.backup)
+            results = DatabaseService.backup_database(
+                db_name,
+                backup_path=args.output
+            )
             return 0 if all(results.values()) else 1
     
     # No action specified

@@ -24,10 +24,11 @@ class DatabaseService:
         user: str = None,
         password: str = None,
         driver: str = None,
-        database: str = 'master'
+        database: str = 'master',
+        config: dict = None
     ) -> str:
         """
-        Build a connection string with custom parameters.
+        Build a connection string with custom parameters or config dict.
         
         Args:
             host: Server hostname/IP (defaults to DB_HOST)
@@ -36,7 +37,15 @@ class DatabaseService:
             password: Password (defaults to DB_PASSWORD)
             driver: ODBC driver (defaults to DB_DRIVER)
             database: Database name (defaults to 'master')
+            config: Optional dict with keys 'host', 'port', 'user', 'password', 'driver'
         """
+        if config:
+            host = host or config.get('host')
+            port = port or config.get('port')
+            user = user or config.get('user')
+            password = password or config.get('password')
+            driver = driver or config.get('driver')
+
         host = host or os.getenv('DB_HOST', 'localhost')
         port = port or os.getenv('DB_PORT', '1433')
         user = user or os.getenv('DB_USER', 'sa')
@@ -55,23 +64,24 @@ class DatabaseService:
         )
     
     @classmethod
-    def get_master_connection_string(cls) -> str:
+    def get_master_connection_string(cls, config: dict = None) -> str:
         """Build connection string to master database."""
-        return cls.build_connection_string(database='master')
+        return cls.build_connection_string(database='master', config=config)
     
     @classmethod
-    def list_all_databases(cls, include_system: bool = False) -> list:
+    def list_all_databases(cls, include_system: bool = False, config: dict = None) -> list:
         """
         List all databases on the SQL Server.
         
         Args:
             include_system: Include system databases (master, model, msdb, tempdb)
+            config: Optional connection config
             
         Returns:
             List of database info dictionaries
         """
         try:
-            conn_str = cls.get_master_connection_string()
+            conn_str = cls.get_master_connection_string(config)
             conn = pyodbc.connect(conn_str, autocommit=True)
             cursor = conn.cursor()
             
@@ -115,18 +125,19 @@ class DatabaseService:
             return []
     
     @classmethod
-    def get_database_info(cls, db_name: str) -> dict:
+    def get_database_info(cls, db_name: str, config: dict = None) -> dict:
         """
         Get detailed information about a specific database.
         
         Args:
             db_name: Name of the database
+            config: Optional connection config
             
         Returns:
             Dictionary with database details
         """
         try:
-            conn_str = cls.get_master_connection_string()
+            conn_str = cls.get_master_connection_string(config)
             conn = pyodbc.connect(conn_str, autocommit=True)
             cursor = conn.cursor()
             
@@ -190,19 +201,20 @@ class DatabaseService:
             return None
     
     @classmethod
-    def get_backup_history(cls, db_name: str = None, limit: int = 10) -> list:
+    def get_backup_history(cls, db_name: str = None, limit: int = 10, config: dict = None) -> list:
         """
         Get backup history for a database or all databases.
         
         Args:
             db_name: Optional database name (None for all)
             limit: Maximum number of records to return
+            config: Optional connection config
             
         Returns:
             List of backup history records
         """
         try:
-            conn_str = cls.get_master_connection_string()
+            conn_str = cls.get_master_connection_string(config)
             conn = pyodbc.connect(conn_str, autocommit=True)
             cursor = conn.cursor()
             
@@ -259,8 +271,19 @@ class DatabaseService:
         return os.getenv('DB_BACKUP_SERVER_PATH', '/var/opt/mssql/backup')
     
     @classmethod
-    def _get_ssh_config(cls) -> dict:
-        """Get SSH configuration from environment variables."""
+    def _get_ssh_config(cls, config: dict = None) -> dict:
+        """Get SSH configuration from environment variables or passed config."""
+        if config and 'ssh' in config:
+            ssh_conf = config['ssh']
+            return {
+                'host': ssh_conf.get('host'),
+                'port': int(ssh_conf.get('port', 22)),
+                'user': ssh_conf.get('user'),
+                'password': ssh_conf.get('password'),
+                'key_file': ssh_conf.get('key_file'),
+                'docker_container': ssh_conf.get('docker_container'),
+            }
+
         return {
             'host': os.getenv('SSH_HOST'),
             'port': int(os.getenv('SSH_PORT', '22')),
@@ -271,43 +294,46 @@ class DatabaseService:
         }
     
     @classmethod
-    def _download_remote_backup(cls, remote_file: str, backup_name: str) -> str:
+    def _download_remote_backup(cls, remote_file: str, backup_name: str, config: dict = None) -> str:
         """Download backup file from remote server via SSH/SFTP."""
-        config = cls._get_ssh_config()
-        
-        if not config['host'] or not config['user']:
+        ssh_config = cls._get_ssh_config(config)
+
+        if not ssh_config.get('host') or not ssh_config.get('user'):
             print(f"\n   ⚠️ SSH not configured. Set SSH_HOST, SSH_USER in .env for auto-download.")
             return None
-        
+
         try:
             import paramiko
         except ImportError:
             print(f"\n   ⚠️ Install paramiko for auto-download: pip install paramiko")
             return None
-        
+
+        ssh = None
+        sftp = None
         try:
-            print(f"\n   🔄 Connecting to {config['host']} via SSH...")
-            
+            print(f"\n   🔄 Connecting to {ssh_config['host']} via SSH...")
+
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            
+
             connect_kwargs = {
-                'hostname': config['host'],
-                'port': config['port'],
-                'username': config['user'],
+                'hostname': ssh_config['host'],
+                'port': ssh_config['port'],
+                'username': ssh_config['user'],
             }
-            if config['key_file']:
-                connect_kwargs['key_filename'] = config['key_file']
-            elif config['password']:
-                connect_kwargs['password'] = config['password']
-            
+
+            if ssh_config.get('key_file'):
+                connect_kwargs['key_filename'] = ssh_config['key_file']
+            elif ssh_config.get('password'):
+                connect_kwargs['password'] = ssh_config['password']
+
             ssh.connect(**connect_kwargs)
-            
-            docker_container = config['docker_container']
+
+            docker_container = ssh_config.get('docker_container')
             if docker_container:
                 print(f"   🐳 Copying from Docker container: {docker_container}")
                 host_temp_file = f"/tmp/{backup_name}"
-                
+
                 _, stdout, stderr = ssh.exec_command(
                     f"docker cp {docker_container}:{remote_file} {host_temp_file}"
                 )
@@ -315,37 +341,47 @@ class DatabaseService:
                 if exit_status != 0:
                     error = stderr.read().decode()
                     print(f"   ❌ Docker copy failed: {error}")
-                    ssh.close()
                     return None
-                
+
                 remote_file = host_temp_file
-            
+
             local_backup_path = cls.get_backup_path()
             os.makedirs(local_backup_path, exist_ok=True)
             local_file = os.path.join(local_backup_path, backup_name)
-            
+
             print(f"   📥 Downloading backup file...")
             sftp = ssh.open_sftp()
             sftp.get(remote_file, local_file)
-            sftp.close()
-            
+
             if docker_container:
                 ssh.exec_command(f"rm -f {remote_file}")
-            
-            ssh.close()
+
             return local_file
-            
+
         except Exception as e:
             print(f"   ❌ SSH download failed: {e}")
             return None
-    
+
+        finally:
+            try:
+                if sftp:
+                    sftp.close()
+            except Exception:
+                pass
+            try:
+                if ssh:
+                    ssh.close()
+            except Exception:
+                pass
+            
     @classmethod
     def backup_database(
         cls,
         db_name: str,
         backup_path: str = None,
         backup_name: str = None,
-        use_server_path: bool = None
+        use_server_path: bool = None,
+        config: dict = None
     ) -> bool:
         """
         Create a backup of a SQL Server database.
@@ -355,13 +391,18 @@ class DatabaseService:
             backup_path: Optional path for backup file
             backup_name: Optional name for backup file
             use_server_path: If True, use DB_BACKUP_SERVER_PATH for Docker/remote
+            config: Optional connection config
             
         Returns:
             True if backup was successful, False otherwise
         """
         if use_server_path is None:
             # Auto-detect remote server: if host is not localhost, use server path
-            db_host = os.getenv('DB_HOST', 'localhost').lower()
+            if config:
+                db_host = config.get('host', 'localhost').lower()
+            else:
+                db_host = os.getenv('DB_HOST', 'localhost').lower()
+                
             is_remote = db_host not in ('localhost', '127.0.0.1', '.')
             use_server_path = is_remote or os.getenv('DB_BACKUP_SERVER_PATH') is not None
         
@@ -381,7 +422,13 @@ class DatabaseService:
         elif not backup_name.endswith('.bak'):
             backup_name += '.bak'
         
-        backup_file = f"{backup_path.rstrip('/\\')}/{backup_name}"
+        # Ensure proper path separator
+        if use_server_path:
+            # Linux/Docker paths use forward slash
+            backup_file = f"{backup_path.rstrip('/')}/{backup_name}"
+        else:
+            # Local paths use native separator
+            backup_file = os.path.join(backup_path, backup_name)
         
         print(f"\n📦 Backing up database: {db_name}")
         print(f"   Backup file: {backup_file}")
@@ -389,7 +436,7 @@ class DatabaseService:
             print(f"   (Using server-side path for Docker/remote SQL Server)")
         
         try:
-            conn_str = cls.get_master_connection_string()
+            conn_str = cls.get_master_connection_string(config)
             conn = pyodbc.connect(conn_str, autocommit=True)
             cursor = conn.cursor()
             
@@ -428,11 +475,12 @@ class DatabaseService:
                 os.makedirs(local_backup_path, exist_ok=True)
                 local_file = os.path.join(local_backup_path, backup_name)
                 
-                local_backup = cls._download_remote_backup(backup_file, backup_name)
+                local_backup = cls._download_remote_backup(backup_file, backup_name, config)
                 if local_backup:
                     print(f"   📥 Downloaded to: {local_backup}")
                 else:
-                    docker_container = os.getenv('DOCKER_CONTAINER', '<container_name>')
+                    ssh_conf = cls._get_ssh_config(config)
+                    docker_container = ssh_conf.get('docker_container') or os.getenv('DOCKER_CONTAINER', '<container_name>')
                     print(f"\n   ⚠️ Backup is on SQL Server, not local machine!")
                     print(f"   📋 To copy backup from Docker container to local:")
                     print(f"      docker cp {docker_container}:{backup_file} {os.path.abspath(local_file)}")
@@ -446,14 +494,14 @@ class DatabaseService:
             return False
     
     @classmethod
-    def _upload_backup_for_restore(cls, local_file: str) -> str:
+    def _upload_backup_for_restore(cls, local_file: str, config: dict = None) -> str:
         """Upload backup file to remote server for restore.
         
         Returns the path accessible by SQL Server (inside Docker container).
         """
-        config = cls._get_ssh_config()
+        ssh_config = cls._get_ssh_config(config)
         
-        if not config['host'] or not config['user']:
+        if not ssh_config['host'] or not ssh_config['user']:
             return None
         
         try:
@@ -463,20 +511,20 @@ class DatabaseService:
             return None
         
         try:
-            print(f"   🔄 Connecting to {config['host']} via SSH...")
+            print(f"   🔄 Connecting to {ssh_config['host']} via SSH...")
             
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
             
             connect_kwargs = {
-                'hostname': config['host'],
-                'port': config['port'],
-                'username': config['user'],
+                'hostname': ssh_config['host'],
+                'port': ssh_config['port'],
+                'username': ssh_config['user'],
             }
-            if config['key_file']:
-                connect_kwargs['key_filename'] = config['key_file']
-            elif config['password']:
-                connect_kwargs['password'] = config['password']
+            if ssh_config.get('key_file'):
+                connect_kwargs['key_filename'] = ssh_config['key_file']
+            elif ssh_config.get('password'):
+                connect_kwargs['password'] = ssh_config['password']
             
             ssh.connect(**connect_kwargs)
             
@@ -488,7 +536,7 @@ class DatabaseService:
             sftp.put(local_file, remote_temp_path)
             sftp.close()
             
-            docker_container = config['docker_container']
+            docker_container = ssh_config.get('docker_container')
             if docker_container:
                 print(f"   🐳 Copying to Docker container: {docker_container}")
                 server_backup_path = cls.get_server_backup_path()
@@ -521,7 +569,8 @@ class DatabaseService:
         cls,
         db_name: str,
         backup_file: str,
-        force: bool = False
+        force: bool = False,
+        config: dict = None
     ) -> bool:
         """
         Restore a SQL Server database from a backup file.
@@ -530,6 +579,7 @@ class DatabaseService:
             db_name: Name of the database to restore
             backup_file: Path to the backup file
             force: If True, drop existing database before restore
+            config: Optional connection config
             
         Returns:
             True if restore was successful, False otherwise
@@ -542,12 +592,16 @@ class DatabaseService:
         print(f"   From backup: {backup_file}")
         
         # Check if SQL Server is remote/Docker
-        db_host = os.getenv('DB_HOST', 'localhost').lower()
+        if config:
+            db_host = config.get('host', 'localhost').lower()
+        else:
+            db_host = os.getenv('DB_HOST', 'localhost').lower()
+            
         is_remote = db_host not in ('localhost', '127.0.0.1', '.')
         
         # For remote/Docker SQL Server, upload the backup first
         if is_remote:
-            remote_backup_path = cls._upload_backup_for_restore(backup_file)
+            remote_backup_path = cls._upload_backup_for_restore(backup_file, config)
             if remote_backup_path:
                 restore_path = remote_backup_path
                 print(f"   📁 Using remote path: {restore_path}")
@@ -560,7 +614,7 @@ class DatabaseService:
             restore_path = os.path.abspath(backup_file)
         
         try:
-            conn_str = cls.get_master_connection_string()
+            conn_str = cls.get_master_connection_string(config)
             conn = pyodbc.connect(conn_str, autocommit=True)
             cursor = conn.cursor()
             
